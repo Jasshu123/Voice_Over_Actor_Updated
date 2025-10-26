@@ -115,18 +115,90 @@ export default function VoiceRecorder({ onRecordingComplete }: VoiceRecorderProp
     }
   };
 
-  const applyTransformation = () => {
+  const applyTransformation = async () => {
     if (!audioURL) return;
 
-    const audio = new Audio(audioURL);
-    audioContextRef.current = new AudioContext();
-    const source = audioContextRef.current.createMediaElementSource(audio);
-    const destination = audioContextRef.current.destination;
+    try {
+      const response = await fetch(audioURL);
+      const blob = await response.blob();
 
-    source.connect(destination);
-    audio.playbackRate = transformOptions.speed;
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-    alert(`Voice transformation applied!\nAccent: ${transformOptions.accent}\nTone: ${transformOptions.tone}\nPitch: ${transformOptions.pitch}x\nSpeed: ${transformOptions.speed}x`);
+      const offlineContext = new OfflineAudioContext(
+        audioBuffer.numberOfChannels,
+        audioBuffer.length,
+        audioBuffer.sampleRate
+      );
+
+      const source = offlineContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.value = transformOptions.speed;
+
+      source.connect(offlineContext.destination);
+      source.start();
+
+      const renderedBuffer = await offlineContext.startRendering();
+
+      const numberOfChannels = renderedBuffer.numberOfChannels;
+      const length = renderedBuffer.length * numberOfChannels * 2;
+      const buffer = new ArrayBuffer(44 + length);
+      const view = new DataView(buffer);
+
+      const writeString = (offset: number, string: string) => {
+        for (let i = 0; i < string.length; i++) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      };
+
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + length, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numberOfChannels, true);
+      view.setUint32(24, renderedBuffer.sampleRate, true);
+      view.setUint32(28, renderedBuffer.sampleRate * numberOfChannels * 2, true);
+      view.setUint16(32, numberOfChannels * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, length, true);
+
+      let offset = 44;
+      for (let i = 0; i < renderedBuffer.length; i++) {
+        for (let channel = 0; channel < numberOfChannels; channel++) {
+          const sample = Math.max(-1, Math.min(1, renderedBuffer.getChannelData(channel)[i]));
+          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+          offset += 2;
+        }
+      }
+
+      const transformedBlob = new Blob([buffer], { type: 'audio/wav' });
+      const transformedURL = URL.createObjectURL(transformedBlob);
+
+      setTransformedAudioURL(transformedURL);
+      setIsTransformed(true);
+
+      const a = document.createElement('a');
+      a.href = transformedURL;
+      a.download = `transformed-recording-${Date.now()}.wav`;
+      a.click();
+
+    } catch (error) {
+      console.error('Error transforming audio:', error);
+      alert('Error transforming audio. Please try again.');
+    }
+  };
+
+  const downloadTransformedRecording = () => {
+    if (transformedAudioURL) {
+      const a = document.createElement('a');
+      a.href = transformedAudioURL;
+      a.download = `transformed-recording-${Date.now()}.wav`;
+      a.click();
+    }
   };
 
   const formatTime = (seconds: number) => {
